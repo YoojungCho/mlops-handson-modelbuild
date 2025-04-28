@@ -43,9 +43,7 @@ if __name__ == "__main__":
     df = pd.read_csv(fn)
     os.unlink(fn)
 
-    df['Initial']=0
-    for i in df:
-        df['Initial']=df.Name.str.extract('([A-Za-z]+)\.') #lets extract the Salutations
+    df['Initial']=df.Name.str.extract('([A-Za-z]+)\.')
     df['Initial'].replace(['Mlle','Mme','Ms','Dr','Major','Lady','Countess','Jonkheer','Col','Rev','Capt','Sir','Don', 'Dona'],
                           ['Miss','Miss','Miss','Mr','Mr','Mrs','Mrs','Other','Other','Other','Mr','Mr','Mr', 'Mr'],inplace=True)
 
