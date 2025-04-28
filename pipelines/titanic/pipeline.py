@@ -49,6 +49,7 @@ from sagemaker.workflow.pipeline_context import PipelineSession
 
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+print(BASE_DIR)
 
 def get_sagemaker_client(region):
      """Gets the sagemaker client.
@@ -145,7 +146,7 @@ def get_pipeline(
     """
     sagemaker_session = get_session(region, default_bucket)
     if role is None:
-        role = sagemaker.session.get_execution_role(sagemaker_session)
+        role = 'arn:aws:iam::721747834183:role/role-adc-MLops-sagemaker-excution'
 
     pipeline_session = get_pipeline_session(region, default_bucket)
 
@@ -154,9 +155,10 @@ def get_pipeline(
     model_approval_status = ParameterString(
         name="ModelApprovalStatus", default_value="PendingManualApproval"
     )
+    
     input_data = ParameterString(
         name="InputDataUrl",
-        default_value=f"s3://sagemaker-servicecatalog-seedcode-{region}/dataset/abalone-dataset.csv",
+        default_value=f"s3://sagemaker-project-p-ovfort6gczry/data/train.csv",
     )
 
     # processing step for feature engineering
@@ -164,53 +166,45 @@ def get_pipeline(
         framework_version="0.23-1",
         instance_type=processing_instance_type,
         instance_count=processing_instance_count,
-        base_job_name=f"{base_job_prefix}/sklearn-abalone-preprocess",
+        base_job_name=f"{base_job_prefix}/preprocess",
         sagemaker_session=pipeline_session,
-        role=role,
+        role='arn:aws:iam::721747834183:role/role-adc-MLops-sagemaker-excution',
     )
     step_args = sklearn_processor.run(
         outputs=[
-            ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
-            ProcessingOutput(output_name="validation", source="/opt/ml/processing/validation"),
-            ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
+            ProcessingOutput(output_name="train", source="/opt/ml/processing/train", destination="s3://sagemaker-project-p-ovfort6gczry/output/data/train.csv"),
+            ProcessingOutput(output_name="test", source="/opt/ml/processing/test", destination="s3://sagemaker-project-p-ovfort6gczry/output/data/test.csv"),
         ],
         code=os.path.join(BASE_DIR, "preprocess.py"),
         arguments=["--input-data", input_data],
     )
     step_process = ProcessingStep(
-        name="PreprocessAbaloneData",
+        name="Preprocess",
         step_args=step_args,
     )
 
     # training step for generating model artifacts
-    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/AbaloneTrain"
+    model_path = f"s3://{sagemaker_session.default_bucket()}/{base_job_prefix}/Train"
     image_uri = sagemaker.image_uris.retrieve(
-        framework="xgboost",
+        framework="sklearn",
         region=region,
         version="1.0-1",
         py_version="py3",
         instance_type=training_instance_type,
     )
-    xgb_train = Estimator(
+    
+    train = Estimator(
         image_uri=image_uri,
         instance_type=training_instance_type,
         instance_count=1,
         output_path=model_path,
-        base_job_name=f"{base_job_prefix}/abalone-train",
+        base_job_name=f"{base_job_prefix}/Train",
         sagemaker_session=pipeline_session,
-        role=role,
+        role='arn:aws:iam::721747834183:role/role-adc-MLops-sagemaker-excution',
+        entry_point = os.path.join(BASE_DIR, "train.py"),
     )
-    xgb_train.set_hyperparameters(
-        objective="reg:linear",
-        num_round=50,
-        max_depth=5,
-        eta=0.2,
-        gamma=4,
-        min_child_weight=6,
-        subsample=0.7,
-        silent=0,
-    )
-    step_args = xgb_train.fit(
+    
+    step_args = train.fit(
         inputs={
             "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
@@ -218,16 +212,11 @@ def get_pipeline(
                 ].S3Output.S3Uri,
                 content_type="text/csv",
             ),
-            "validation": TrainingInput(
-                s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "validation"
-                ].S3Output.S3Uri,
-                content_type="text/csv",
-            ),
         },
     )
+
     step_train = TrainingStep(
-        name="TrainAbaloneModel",
+        name="TrainModel",
         step_args=step_args,
     )
 
@@ -237,9 +226,9 @@ def get_pipeline(
         command=["python3"],
         instance_type=processing_instance_type,
         instance_count=1,
-        base_job_name=f"{base_job_prefix}/script-abalone-eval",
+        base_job_name=f"{base_job_prefix}/eval",
         sagemaker_session=pipeline_session,
-        role=role,
+        role='arn:aws:iam::721747834183:role/role-adc-MLops-sagemaker-excution',
     )
     step_args = script_eval.run(
         inputs=[
@@ -265,7 +254,7 @@ def get_pipeline(
         path="evaluation.json",
     )
     step_eval = ProcessingStep(
-        name="EvaluateAbaloneModel",
+        name="EvaluateModel",
         step_args=step_args,
         property_files=[evaluation_report],
     )
@@ -295,7 +284,7 @@ def get_pipeline(
         model_metrics=model_metrics,
     )
     step_register = ModelStep(
-        name="RegisterAbaloneModel",
+        name="RegistereModel",
         step_args=step_args,
     )
 
@@ -304,12 +293,12 @@ def get_pipeline(
         left=JsonGet(
             step_name=step_eval.name,
             property_file=evaluation_report,
-            json_path="regression_metrics.mse.value"
+            json_path="binary_classification_metrics.accuracy.value"
         ),
         right=6.0,
     )
     step_cond = ConditionStep(
-        name="CheckMSEAbaloneEvaluation",
+        name="CheckMSEEvaluation",
         conditions=[cond_lte],
         if_steps=[step_register],
         else_steps=[],
@@ -325,7 +314,12 @@ def get_pipeline(
             model_approval_status,
             input_data,
         ],
-        steps=[step_process, step_train, step_eval, step_cond],
+        steps=[
+            step_process,
+            step_train,
+            step_eval,
+            step_cond
+        ],
         sagemaker_session=pipeline_session,
     )
     return pipeline
